@@ -268,11 +268,38 @@ function translateContent(content) {
   return content.map((part) => {
     if (typeof part === "string") return part;
     const translated = { ...part };
-    if (translated.type === "input_text" || translated.type === "output_text") {
+    if (translated.type === "input_text" || translated.type === "output_text" || translated.type === "reasoning_text") {
       translated.type = "text";
     }
     return translated;
   });
+}
+
+/**
+ * 从 Responses API content 数组中提取 reasoning_text 并单独返回，
+ * 同时返回不含 reasoning_text 的普通内容。
+ * DeepSeek 要求 reasoning_content 必须被传回后续请求。
+ */
+function extractReasoningFromContent(content) {
+  if (!Array.isArray(content)) return { cleanContent: content, reasoning: null };
+  const regularParts = [];
+  const reasoningParts = [];
+  for (const part of content) {
+    if (typeof part === "string") {
+      regularParts.push(part);
+    } else if (part?.type === "reasoning_text") {
+      reasoningParts.push(part.text ?? "");
+    } else {
+      regularParts.push(part);
+    }
+  }
+  if (reasoningParts.length === 0) {
+    return { cleanContent: content, reasoning: null };
+  }
+  return {
+    cleanContent: regularParts,
+    reasoning: reasoningParts.join(""),
+  };
 }
 
 function translateInputToMessages(input, instructions) {
@@ -288,6 +315,13 @@ function translateInputToMessages(input, instructions) {
   // 将 function_call_output 转为 tool 消息
   for (let i = 0; i < input.length; i++) {
     const item = input[i];
+
+    // 调试: 打印含有 reasoning 的 item 结构
+    if (item.reasoning_content || (item.type === "function_call" && item.reasoning_content)) {
+      console.log(`[proxy] DEBUG input[${i}] has reasoning_content:`,
+        JSON.stringify({ type: item.type, role: item.role, hasContent: !!item.content,
+          hasReasoning: !!item.reasoning_content, hasToolCalls: !!item.tool_calls }),);
+    }
 
     if (item.type === "function_call") {
       // 归入前一个 assistant 或创建新的
@@ -305,20 +339,49 @@ function translateInputToMessages(input, instructions) {
           arguments: item.arguments,
         },
       });
+      // function_call item 可能携带 reasoning_content (Codex 将推理
+      // 从 assistant 消息拆分到各工具调用项上)
+      if (item.reasoning_content && !last.reasoning_content) {
+        last.reasoning_content = item.reasoning_content;
+      }
     } else if (item.type === "function_call_output") {
-      messages.push({
+      const toolMsg = {
         role: "tool",
         tool_call_id: item.call_id || item.id,
         content: translateContent(item.output ?? ""),
-      });
+      };
+      // 极少见,但保留以防 DeepSeek 要求
+      if (item.reasoning_content) {
+        toolMsg.reasoning_content = item.reasoning_content;
+      }
+      messages.push(toolMsg);
     } else if (item.role) {
       // 普通消息 — developer role 不被 DeepSeek 支持，映射为 system
       let role = item.role;
       if (role === "developer") role = "system";
-      const msg = { role, content: translateContent(item.content) };
+
+      // DeepSeek 思考模式要求前序 assistant 消息的 reasoning_content 必须传回,
+      // 否则报 400 错误。同时从 content 中移除 reasoning_text 块,
+      // 因为 DeepSeek 的 Chat API 只认识 "text" 类型。
+      let reasoningContent = item.reasoning_content || null;
+      let cleanContent = item.content;
+
+      if (!reasoningContent && role === "assistant" && Array.isArray(item.content)) {
+        const extracted = extractReasoningFromContent(item.content);
+        if (extracted.reasoning) {
+          reasoningContent = extracted.reasoning;
+          cleanContent = extracted.cleanContent;
+        }
+      }
+
+      const msg = { role, content: translateContent(cleanContent) };
       if (item.name) msg.name = item.name;
       if (item.tool_calls) msg.tool_calls = item.tool_calls;
       if (item.tool_call_id) msg.tool_call_id = item.tool_call_id;
+      if (reasoningContent) {
+        msg.reasoning_content = reasoningContent;
+      }
+
       messages.push(msg);
     } else if (item.content) {
       // 无 role 但有 content，默认 user
@@ -367,6 +430,7 @@ class SseTranslator {
     this.itemId = null;
     this.toolCallIndex = 0;
     this.contentSoFar = "";
+    this.reasoningSoFar = "";
     this.toolCallsSoFar = [];
     this.currentToolCall = null;
     this.dsmlDetected = false;
@@ -402,6 +466,7 @@ class SseTranslator {
 
   onReasoningDelta(text) {
     if (!this.started) this.start();
+    this.reasoningSoFar += text;
     this.writeEvent("response.reasoning_text.delta", {
       type: "response.reasoning_text.delta",
       response_id: this.responseId,
@@ -562,8 +627,15 @@ class SseTranslator {
       }
     }
 
-    // response.output_item.done for text
-    if (this.contentSoFar) {
+    // response.output_item.done for text (include reasoning if captured)
+    if (this.contentSoFar || this.reasoningSoFar) {
+      const contentBlocks = [];
+      if (this.reasoningSoFar) {
+        contentBlocks.push({ type: "reasoning_text", text: this.reasoningSoFar });
+      }
+      if (this.contentSoFar) {
+        contentBlocks.push({ type: "output_text", text: this.contentSoFar });
+      }
       this.writeEvent("response.output_item.done", {
         type: "response.output_item.done",
         response_id: this.responseId,
@@ -572,7 +644,7 @@ class SseTranslator {
           id: this.itemId,
           type: "message",
           role: "assistant",
-          content: [{ type: "output_text", text: this.contentSoFar }],
+          content: contentBlocks,
           status: "completed",
         },
       });
@@ -594,14 +666,19 @@ class SseTranslator {
             }
           : { input_tokens: 0, output_tokens: 0, total_tokens: 0 },
         output: [
-          ...(this.contentSoFar
+          ...(this.contentSoFar || this.reasoningSoFar
             ? [
                 {
                   id: this.itemId,
                   type: "message",
                   role: "assistant",
                   content: [
-                    { type: "output_text", text: this.contentSoFar },
+                    ...(this.reasoningSoFar
+                      ? [{ type: "reasoning_text", text: this.reasoningSoFar }]
+                      : []),
+                    ...(this.contentSoFar
+                      ? [{ type: "output_text", text: this.contentSoFar }]
+                      : []),
                   ],
                   status: "completed",
                 },
@@ -660,6 +737,18 @@ async function handleResponsesRequest(req, res, body) {
   // 翻译消息
   const messages = translateInputToMessages(input, instructions);
 
+  // 调试: 打印消息摘要
+  console.log("[proxy] === 消息摘要 ===");
+  messages.forEach((m, i) => {
+    const hasReasoning = !!m.reasoning_content;
+    const hasContent = !!m.content;
+    const hasToolCalls = !!(m.tool_calls && m.tool_calls.length > 0);
+    const contentLen = typeof m.content === "string" ? m.content.length
+      : Array.isArray(m.content) ? m.content.length : 0;
+    console.log(`[proxy]   msg[${i}] role=${m.role} hasReasoning=${hasReasoning} hasContent=${hasContent} contentLen=${contentLen} hasToolCalls=${hasToolCalls}`);
+  });
+  console.log("[proxy] ==============");
+
   // 构建 Chat Completions 请求体
   const chatBody = {
     model,
@@ -676,10 +765,38 @@ async function handleResponsesRequest(req, res, body) {
     chatBody.max_tokens = maxOutputTokens;
   }
 
-  // 思考模式
-  if (THINKING === "enabled" || body.thinking) {
+  // 思考模式 (仅通过环境变量 DEEPSEEK_THINKING=enabled 显式启用)
+  // 不自动转发 Codex 客户端的 thinking 标志, 因为 DeepSeek 模型可能不支持
+  // 该参数, 且多轮对话需要 reasoning_content 来回传才能正常工作。
+  let useThinking = THINKING === "enabled";
+  console.log(`[proxy] thinking: THINKING=${THINKING} body.thinking=${body.thinking} useThinking=${useThinking}`);
+  if (useThinking) {
+    const assistantCount = messages.filter((m) => m.role === "assistant").length;
+    const missingCount = messages.filter((m) => m.role === "assistant" && !m.reasoning_content).length;
+    console.log(`[proxy] thinking check: assistantCount=${assistantCount} missingReasoning=${missingCount}`);
+    if (assistantCount > 0 && missingCount > 0) {
+      console.log(`[proxy] 多轮对话中检测到 ${missingCount}/${assistantCount} 条 assistant 消息缺少 reasoning_content, 本次请求关闭思考模式以避免 400 错误`);
+      useThinking = false;
+    }
+  }
+  if (useThinking) {
     chatBody.thinking = { type: "enabled" };
     chatBody.reasoning_effort = body.reasoning_effort ?? REASONING_EFFORT;
+    console.log("[proxy] thinking: ENABLED");
+  } else {
+    // 关闭思考模式时, 清除所有 assistant 消息中的 reasoning_content,
+    // 避免 DeepSeek 因混合状态 (部分有、部分无) 报 400 错误。
+    let stripped = 0;
+    for (const msg of messages) {
+      if (msg.role === "assistant" && msg.reasoning_content) {
+        delete msg.reasoning_content;
+        stripped++;
+      }
+    }
+    if (stripped > 0) {
+      console.log(`[proxy] stripped reasoning_content from ${stripped} assistant messages`);
+    }
+    console.log("[proxy] thinking: DISABLED");
   }
 
   console.log(`[proxy] → DeepSeek | model=${model} tools=${tools.length}/${rawTools.length} messages=${messages.length} stream=${stream}`);
