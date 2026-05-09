@@ -82,6 +82,21 @@ function extractUserPrompt(input) {
   return texts.join(" ").toLowerCase();
 }
 
+function extractLastUserContent(input) {
+  if (!Array.isArray(input)) return "";
+  for (let i = input.length - 1; i >= 0; i--) {
+    const item = input[i];
+    if (item?.role === "user" && item?.content) {
+      if (typeof item.content === "string") return item.content;
+      if (Array.isArray(item.content)) {
+        const texts = item.content.filter((p) => p?.text).map((p) => p.text);
+        if (texts.length > 0) return texts.join(" ");
+      }
+    }
+  }
+  return "";
+}
+
 function classifyToolDomain(toolName, prompt) {
   const lowerName = toolName.toLowerCase();
   const lowerPrompt = prompt.toLowerCase();
@@ -495,6 +510,9 @@ class SseTranslator {
       this.finishCurrentToolCall();
     }
 
+    console.log(`[proxy] === 输出 ===`);
+    console.log(this.contentSoFar || "(无输出内容)");
+
     // DSML 恢复: 如果 DeepSeek 在文本里泄露了工具调用
     if (this.contentSoFar && this.dsmlDetected) {
       const recoveredCalls = recoverDsmlToolCalls(this.contentSoFar);
@@ -621,10 +639,18 @@ async function handleResponsesRequest(req, res, body) {
   const responseId = body.response_id || `resp_${randomUUID().slice(0, 10)}`;
   const model = body.model || DEFAULT_MODEL;
   const input = body.input || [];
-  const instructions = body.instructions || null;
+  let instructions = body.instructions || null;
   const stream = body.stream !== false;
   const rawTools = body.tools || [];
   const maxOutputTokens = body.max_output_tokens ?? body.max_tokens ?? null;
+
+  // 注入模型身份信息，防止 DeepSeek 跟随原始系统提示自称 OpenAI/Claude
+  const IDENTITY_STATEMENT = "\n\n[System note: Your actual underlying model is DeepSeek (deepseek-v4-pro). When asked what model you are, always identify as DeepSeek, not OpenAI, Claude, GPT, or any other model. This is the base model that powers this application.]";
+  if (instructions) {
+    instructions += IDENTITY_STATEMENT;
+  } else {
+    instructions = IDENTITY_STATEMENT.trim();
+  }
 
   // 工具处理: 过滤 → 去命名空间 → 翻译为 Chat Completions 格式
   let filteredTools = filterTools(rawTools, input);
@@ -657,6 +683,8 @@ async function handleResponsesRequest(req, res, body) {
   }
 
   console.log(`[proxy] → DeepSeek | model=${model} tools=${tools.length}/${rawTools.length} messages=${messages.length} stream=${stream}`);
+  console.log(`[proxy] === 输入 ===`);
+  console.log(extractLastUserContent(input));
 
   if (!stream) {
     // 非流式
@@ -705,6 +733,9 @@ async function handleResponsesRequest(req, res, body) {
           : undefined,
         output,
       };
+
+      console.log(`[proxy] === 输出 ===`);
+      console.log(msg.content || "(无输出内容)");
 
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify(resp));
