@@ -9,18 +9,12 @@ dotenv.config();
 // 配置
 // ============================================================
 const DEEPSEEK_API_KEY = process.env.api_key ?? "";
-const DEEPSEEK_API_URL = process.env.DEEPSEEK_API_URL ?? "https://api.deepseek.com/chat/completions";
 const PROXY_HOST = process.env.DEEPSEEK_PROXY_HOST ?? "127.0.0.1";
 const PROXY_PORT = parseInt(process.env.DEEPSEEK_PROXY_PORT ?? "11435", 10);
 const DEFAULT_MODEL = process.env.DEEPSEEK_MODEL ?? "deepseek-v4-pro";
 const THINKING = process.env.DEEPSEEK_THINKING ?? "disabled";
 const REASONING_EFFORT = process.env.DEEPSEEK_REASONING_EFFORT ?? "medium";
 const MAX_TOOLS = 128;
-
-// CCSwitch 上游代理 (为空则直连 DeepSeek)
-const CCSWITCH_UPSTREAM = process.env.CCSWITCH_UPSTREAM ?? "";
-// CCSwitch 默认本地地址
-const CCSWITCH_PROXY_URL = "http://127.0.0.1:15721/v1";
 
 const NAMESPACE_SEP = "___";
 
@@ -59,13 +53,10 @@ const DOMAIN_CAPS = {
 };
 
 // ============================================================
-// DeepSeek 客户端 (支持直连或 CCSwitch 上游)
+// DeepSeek 客户端
 // ============================================================
-const upstreamBase = CCSWITCH_UPSTREAM
-  || DEEPSEEK_API_URL.replace(/\/chat\/completions\/?$/, "");
-
 const deepseek = new OpenAI({
-  baseURL: upstreamBase,
+  baseURL: "https://api.deepseek.com",
   apiKey: DEEPSEEK_API_KEY,
   defaultHeaders: {
     "User-Agent": "codex-deepseek-proxy/1.0",
@@ -183,8 +174,6 @@ function renaspaceToolName(shortName, nameMap) {
 // ============================================================
 // DSML 恢复: DeepSeek 有时把工具调用当纯文本输出
 // ============================================================
-const DSML_RE =
-  /<dsml\|function_calls>\s*(.*?)\s*<\/dsml\|function_calls>/gs;
 const DSML_INVOKE_RE =
   /<dsml\|invoke\s+name="([^"]+)"(?:\s+id="([^"]*)")?\s*>\s*(.*?)\s*<\/dsml\|invoke>/gs;
 const DSML_PARAM_RE =
@@ -615,7 +604,7 @@ class SseTranslator {
     this.res.end();
   }
 
-  error(message, statusCode = 500) {
+  error(message) {
     this.writeEvent("error", {
       type: "error",
       code: "proxy_error",
@@ -831,7 +820,7 @@ const server = http.createServer(async (req, res) => {
       JSON.stringify({
         service: "codex-deepseek-proxy",
         version: "1.0.0",
-        upstream: CCSWITCH_UPSTREAM ? `CCSwitch (${CCSWITCH_UPSTREAM}) -> DeepSeek` : "DeepSeek API (直连)",
+        upstream: "DeepSeek API",
         status: "ok",
       })
     );
@@ -881,11 +870,7 @@ server.listen(PROXY_PORT, PROXY_HOST, () => {
   console.log("========================================");
   console.log(`  Address:   http://${PROXY_HOST}:${PROXY_PORT}`);
   console.log(`  Endpoint:  http://${PROXY_HOST}:${PROXY_PORT}/v1/responses`);
-  if (CCSWITCH_UPSTREAM) {
-    console.log(`  Upstream:  CCSwitch @ ${CCSWITCH_UPSTREAM} -> DeepSeek`);
-  } else {
-    console.log(`  Upstream:  DeepSeek API (直连)`);
-  }
+  console.log(`  Upstream:  DeepSeek API`);
   console.log(`  Model:     ${DEFAULT_MODEL}`);
   console.log(`  Thinking:  ${THINKING}`);
   console.log(`  Max Tools: ${MAX_TOOLS}`);
