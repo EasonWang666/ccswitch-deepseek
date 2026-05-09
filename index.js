@@ -67,10 +67,6 @@ function translateMessages(input) {
       stripped++;
     }
   }
-  if (stripped > 0) {
-    console.log(`[proxy] 清除了 ${stripped} 条消息中的 reasoning_content`);
-  }
-
   return messages;
 }
 
@@ -208,9 +204,6 @@ class SseTranslator {
 
     console.log("=== 输出 ===");
     console.log(this.contentSoFar || "(无文本输出)");
-    for (const [, call] of this.toolCalls) {
-      console.log(`  [tool] ${call.name}(${call.arguments.slice(0, 200)}...)`);
-    }
 
     // 构建 output 数组
     const output = [];
@@ -352,7 +345,6 @@ const server = http.createServer(async (req, res) => {
       if (body.max_output_tokens) chatBody.max_tokens = body.max_output_tokens;
 
       const inputText = lastUserText(messages);
-      console.log(`→ DeepSeek | model=${MODEL} stream=${stream} tools=${tools.length} msgs=${messages.length}`);
       console.log("=== 输入 ===");
       console.log(inputText);
 
@@ -366,12 +358,11 @@ const server = http.createServer(async (req, res) => {
           "Accept": stream ? "text/event-stream" : "application/json",
         },
       }, (dsRes) => {
-        console.log("[proxy] DeepSeek 响应状态:", dsRes.statusCode);
         if (dsRes.statusCode !== 200) {
           let errBody = "";
           dsRes.on("data", (c) => errBody += c);
           dsRes.on("end", () => {
-            console.error("[proxy] DeepSeek 错误响应:", errBody.slice(0, 500));
+            console.error("[DeepSeek]", dsRes.statusCode, errBody.slice(0, 300));
             res.writeHead(502, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: { message: `DeepSeek ${dsRes.statusCode}: ${errBody.slice(0, 200)}` } }));
           });
@@ -417,9 +408,7 @@ const server = http.createServer(async (req, res) => {
 
         let buffer = "";
         dsRes.on("data", (chunk) => {
-          const raw = chunk.toString();
-          console.log("[raw]", raw.slice(0, 500));
-          buffer += raw;
+          buffer += chunk.toString();
           const lines = buffer.split("\n");
           buffer = lines.pop() ?? "";
 
