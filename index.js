@@ -1,4 +1,4 @@
-import http from "node:http";
+﻿import http from "node:http";
 import https from "node:https";
 import dotenv from "dotenv";
 
@@ -22,7 +22,17 @@ function extractText(content) {
 
 function translateMessages(input) {
   const messages = [];
-  if (!Array.isArray(input)) return messages;
+
+  if (!Array.isArray(input)) {
+    // Codex CLI 有时以纯字符串形式发送 input (非数组)
+    if (typeof input === "string" && input.trim()) {
+      messages.push({ role: "user", content: input });
+    } else if (typeof input === "object" && input !== null) {
+      const text = extractText(input.content);
+      if (text) messages.push({ role: "user", content: text });
+    }
+    return messages;
+  }
 
   for (const item of input) {
     if (item.type === "function_call") {
@@ -480,3 +490,4 @@ server.listen(PORT, "127.0.0.1", () => {
   console.log(`  Model: ${MODEL}`);
   if (!DEEPSEEK_API_KEY) console.warn("  WARNING: api_key not set in .env");
 });
+
