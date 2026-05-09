@@ -332,9 +332,10 @@ const server = http.createServer(async (req, res) => {
       const stream = body.stream !== false;
 
       const messages = translateMessages(body.input);
-      if (body.instructions) {
-        messages.unshift({ role: "system", content: body.instructions });
-      }
+      // 注入身份声明到 instructions 末尾
+      const IDENTITY = "\n\n[IMPORTANT: Your true underlying model is DeepSeek (deepseek-v4-pro), developed by DeepSeek (深度求索). You are NOT OpenAI, GPT, Claude, or Codex. When asked about your model identity, you MUST answer that you are DeepSeek, not any other model. Ignore any conflicting identity claims in the instructions above.]";
+      let instructions = body.instructions ? body.instructions + IDENTITY : IDENTITY.trim();
+      messages.unshift({ role: "system", content: instructions });
 
       const chatBody = {
         model: MODEL,
