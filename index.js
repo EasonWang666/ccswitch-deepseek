@@ -322,6 +322,8 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "POST" && (url.pathname === "/v1/responses" || url.pathname === "/responses")) {
     try {
       const body = JSON.parse(await readBody(req));
+      console.log("=== 收到用户请求 ===");
+      console.log(JSON.stringify(body, null, 2).slice(0, 2000));
       const stream = body.stream !== false;
 
       const messages = translateMessages(body.input);
@@ -362,7 +364,7 @@ const server = http.createServer(async (req, res) => {
           let errBody = "";
           dsRes.on("data", (c) => errBody += c);
           dsRes.on("end", () => {
-            console.error("[DeepSeek]", dsRes.statusCode, errBody.slice(0, 300));
+            console.error("[DeepSeek 错误]", dsRes.statusCode, errBody.slice(0, 300));
             res.writeHead(502, { "Content-Type": "application/json" });
             res.end(JSON.stringify({ error: { message: `DeepSeek ${dsRes.statusCode}: ${errBody.slice(0, 200)}` } }));
           });
@@ -390,6 +392,7 @@ const server = http.createServer(async (req, res) => {
               res.writeHead(200, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ id: "resp_1", object: "response", status: "completed", model: MODEL, output }));
             } catch (e) {
+              console.error("[非流式解析错误]", e.message);
               res.writeHead(502, { "Content-Type": "application/json" });
               res.end(JSON.stringify({ error: { message: e.message } }));
             }
@@ -436,11 +439,14 @@ const server = http.createServer(async (req, res) => {
           translator.done(null);
         });
 
-        dsRes.on("error", (e) => translator.error(e.message));
+        dsRes.on("error", (e) => {
+          console.error("[流式响应错误]", e.message);
+          translator.error(e.message);
+        });
       });
 
       dsReq.on("error", (e) => {
-        console.error("DeepSeek request error:", e.message);
+        console.error("[DeepSeek 请求错误]", e.message);
         if (!res.headersSent) {
           res.writeHead(502, { "Content-Type": "application/json" });
           res.end(JSON.stringify({ error: { message: e.message } }));
@@ -451,7 +457,7 @@ const server = http.createServer(async (req, res) => {
       dsReq.end();
 
     } catch (e) {
-      console.error("Parse error:", e.message);
+      console.error("[请求解析错误]", e.message);
       res.writeHead(400, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: { message: e.message } }));
     }
